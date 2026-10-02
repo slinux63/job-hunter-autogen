@@ -1,99 +1,106 @@
 from __future__ import annotations
 
+import argparse
 import json
-import re
-from typing import Any
+from datetime import datetime
+from pathlib import Path
 
-import requests
-
-
-def build_llm_config() -> dict[str, Any]:
-    return {
-        "model": "mistral",
-        "api_key": "unused",
-        "base_url": "http://localhost:1234/v1",
-        "api_type": "open_ai",
-        "temperature": 0.2,
-    }
+from job_hunter.agents import build_daily_digest, score_job_against_cv
+from job_hunter.config import get_settings
+from job_hunter.db import JobStore
+from job_hunter.sources import fetch_public_jobs
 
 
-def get_local_completion(prompt: str, model: str = "mistral") -> str:
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
-    try:
-        response = requests.post(
-            "http://localhost:1234/v1/chat/completions",
-            json=payload,
-            timeout=60,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception:
-        return ""
+def load_cv(path: str) -> str:
+    file_path = Path(path)
+    if file_path.exists():
+        return file_path.read_text(encoding="utf-8")
+    return """# Default Profile Summary
+
+## Core Skills
+- Python, FastAPI, Django, SQL, PostgreSQL
+- REST APIs, microservices architecture
+- Docker, Kubernetes, AWS, CI/CD
+- Backend development, system design
+"""
 
 
-def score_job_against_cv(job: dict[str, Any], cv_text: str) -> dict[str, Any]:
-    job_text = f"{job.get('title', '')} {job.get('description', '')} {job.get('company', '')}".lower()
-    cv_lower = cv_text.lower()
+def create_sample_cv(path: str) -> None:
+    file_path = Path(path)
+    if file_path.exists():
+        return
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(
+        """# Candidate profile
 
-    required_keywords = [
-        "python",
-        "sql",
-        "api",
-        "backend",
-        "docker",
-        "aws",
-        "fastapi",
-        "django",
-        "microservices",
-        "cloud",
-    ]
+## Summary
+Python backend developer with experience in APIs, SQL, Docker, cloud deployment, and system design.
 
-    found = [kw for kw in required_keywords if kw in job_text and kw in cv_lower]
-    missing = [kw for kw in required_keywords if kw in job_text and kw not in cv_lower]
+## Skills
+- Python
+- FastAPI
+- Django
+- SQL / PostgreSQL
+- REST APIs
+- Docker
+- AWS
+- CI/CD
+- Microservices
 
-    score = min(100, max(30, round((len(found) / max(len(required_keywords), 1)) * 100)))
+## Experience
+- Built internal API services and data workflows
+- Improved deployment reliability with Docker and CI pipelines
+- Worked on service integration and observability
 
-    if not found:
-        score = 35
-
-    summary = (
-        f"Strong fit for {job.get('title', 'role')} because the profile includes {', '.join(found[:3]) or 'core technical context'}."
-        if found
-        else f"Moderate fit for {job.get('title', 'role')}; the profile is not yet aligned with the most relevant keywords."
+## Goals
+Looking for backend engineering roles focused on Python, API products, and scalable systems.
+""",
+        encoding="utf-8",
     )
 
-    return {
-        "match_score": score,
-        "fit_summary": summary,
-        "missing_skills": ", ".join(missing[:5]) if missing else "No major gaps detected",
-        "action": "Apply now"
-        if score >= 70
-        else "Review and tailor CV"
-        if score >= 50
-        else "Skip for now",
-    }
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Local AI job hunter")
+    parser.add_argument("--keywords", default=None, help="Job keywords")
+    parser.add_argument("--location", default=None, help="Search location")
+    parser.add_argument("--limit", type=int, default=None, help="Maximum jobs")
+    parser.add_argument("--output", default="data/daily_digest.md", help="Digest output path")
+    return parser.parse_args()
 
 
-def build_daily_digest(scored_jobs: list[dict[str, Any]]) -> str:
-    sorted_jobs = sorted(scored_jobs, key=lambda item: item["match_score"], reverse=True)
-    top = sorted_jobs[:3]
-    medium = [item for item in sorted_jobs if 50 <= item["match_score"] < 70]
+def main() -> None:
+    args = parse_args()
+    settings = get_settings()
+    if args.keywords:
+        settings.job_keywords = args.keywords
+    if args.location:
+        settings.job_location = args.location
+    if args.limit:
+        settings.max_results = args.limit
 
-    lines = [
-        "# Daily job digest",
-        f"- Strong matches: {len(top)}",
-        f"- Medium matches: {len(medium)}",
-        "",
-        "## Best targets",
-    ]
+    Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
+    create_sample_cv(settings.cv_path)
 
-    for item in top:
-        lines.append(f"- {item['title']} @ {item['company']} ({item['match_score']}% fit) -> {item['action']}")
+    store = JobStore(settings.db_path)
+    jobs = fetch_public_jobs(settings.job_keywords, settings.job_location, limit=settings.max_results)
+    store.save_offers(jobs)
 
-    lines.extend(["", "## Actions to take", "- Tailor the CV to the top 3 roles.", "- Prepare a short intro for the best opportunities.", "- Follow up on pending applications."])
-    return "\n".join(lines)
+    cv_text = load_cv(settings.cv_path)
+    scored_jobs = []
+    for job in jobs:
+        result = score_job_against_cv(job, cv_text)
+        scored = {**job, **result}
+        scored_jobs.append(scored)
+        store.save_application(job, result["match_score"], result["fit_summary"], result["missing_skills"], result["action"])
+
+    digest = build_daily_digest(scored_jobs)
+    store.save_summary(digest)
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.output).write_text(digest, encoding="utf-8")
+    store.close()
+
+    print(json.dumps({"timestamp": datetime.now().isoformat(), "jobs": scored_jobs, "digest": digest}, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

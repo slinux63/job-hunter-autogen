@@ -1,72 +1,99 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
-import requests
-from bs4 import BeautifulSoup
+
+def score_job_against_cv(job: dict[str, Any], cv_text: str) -> dict[str, Any]:
+    job_text = f"{job.get('title', '')} {job.get('description', '')} {job.get('company', '')}".lower()
+    cv_lower = cv_text.lower()
+
+    required_keywords = [
+        "python",
+        "sql",
+        "api",
+        "backend",
+        "docker",
+        "aws",
+        "fastapi",
+        "django",
+        "microservices",
+        "cloud",
+        "kubernetes",
+        "postgresql",
+        "rest",
+        "devops",
+    ]
+
+    found = [kw for kw in required_keywords if kw in job_text and kw in cv_lower]
+    missing = [kw for kw in required_keywords if kw in job_text and kw not in cv_lower]
+
+    if found:
+        score = min(100, max(30, round((len(found) / max(len(required_keywords), 1)) * 100)))
+    else:
+        score = 35
+
+    summary = f"Strong fit: profile includes {', '.join(found[:3])}." if found else "Moderate fit: profile lacks some key technical requirements."
+    if score >= 75:
+        action = "🎯 Apply immediately"
+    elif score >= 60:
+        action = "✅ Tailor CV and apply"
+    elif score >= 45:
+        action = "⚠️ Review and consider"
+    else:
+        action = "❌ Skip for now"
+
+    return {
+        "match_score": score,
+        "fit_summary": summary,
+        "missing_skills": ", ".join(missing[:5]) if missing else "No major gaps detected",
+        "action": action,
+    }
 
 
-DEFAULT_SEARCH_URLS = [
-    "https://www.indeed.com/jobs?q={query}&l={location}",
-    "https://www.welcometothejungle.com/fr/jobs?query={query}&location={location}",
-]
+def build_daily_digest(scored_jobs: list[dict[str, Any]]) -> str:
+    if not scored_jobs:
+        return "# Daily Job Digest\n\nNo jobs found today.\n"
 
+    sorted_jobs = sorted(scored_jobs, key=lambda item: item["match_score"], reverse=True)
+    top = sorted_jobs[:3]
+    medium = [item for item in sorted_jobs if 50 <= item["match_score"] < 75]
+    low = [item for item in sorted_jobs if item["match_score"] < 50]
 
-def normalize_text(value: str | None) -> str:
-    if not value:
-        return ""
-    return re.sub(r"\s+", " ", value).strip()
+    lines = [
+        "# 📋 Daily Job Digest",
+        "**Today's summary:**",
+        f"- 🎯 Strong matches: {len(top)}",
+        f"- ✅ Medium matches: {len(medium)}",
+        f"- ⚠️ Other opportunities: {len(low)}",
+        f"- 📊 Total analyzed: {len(scored_jobs)}",
+        "",
+    ]
 
-
-def search_urls(query: str, location: str) -> list[str]:
-    q = query.strip().replace(" ", "+")
-    loc = location.strip().replace(" ", ")
-    return [url.format(query=q, location=loc) for url in DEFAULT_SEARCH_URLS]
-
-
-def fetch_public_jobs(query: str, location: str, limit: int = 10) -> list[dict[str, Any]]:
-    jobs: list[dict[str, Any]] = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    for url in search_urls(query, location):
-        try:
-            response = requests.get(url, headers=headers, timeout=20)
-            response.raise_for_status()
-        except requests.RequestException:
-            continue
-
-        soup = BeautifulSoup(response.text, "lxml")
-        cards = soup.select("a, .job_seen_beacon, .job-card, .job-card-container")[:limit]
-
-        for card in cards:
-            title = normalize_text(card.get_text(" ", strip=True))
-            if not title:
-                continue
-            jobs.append(
-                {
-                    "source": "public_search",
-                    "title": title[:120],
-                    "company": "Public source",
-                    "location": location,
-                    "url": url,
-                    "salary": "N/A",
-                    "description": "Fetched from public search page",
-                }
+    if top:
+        lines.extend(["## 🎯 Top Opportunities (Apply Now)", ""])
+        for i, item in enumerate(top, 1):
+            lines.append(
+                f"{i}. **{item['title']}** @ {item['company']} | {item['location']}\n"
+                f"   - Match: {item['match_score']}% | {item['fit_summary']}\n"
+                f"   - Action: {item['action']}\n"
             )
-            if len(jobs) >= limit:
-                return jobs
 
-    if not jobs:
-        jobs.append(
-            {
-                "source": "demo",
-                "title": "Example job: Python backend developer",
-                "company": "Example Company",
-                "location": location,
-                "url": "https://example.com/job",
-                "salary": "€60-90k",
-                "description": "Demo record used when no public sources are reachable.",
-            }
-        )
-    return jobs[:limit]
+    if medium:
+        lines.extend(["## ✅ Worth Reviewing (Tailor & Apply)", ""])
+        for i, item in enumerate(medium[:3], 1):
+            lines.append(
+                f"{i}. **{item['title']}** @ {item['company']} | {item['location']}\n"
+                f"   - Match: {item['match_score']}% | {item['fit_summary']}\n"
+            )
+
+    lines.extend([
+        "",
+        "## 📌 Next Steps",
+        "1. Review the top 3 opportunities in detail",
+        "2. Tailor your CV and cover letter for each",
+        "3. Personalize your outreach message",
+        "4. Track applications and follow-ups",
+        "5. Update your CV with new skills as you learn",
+        "",
+    ])
+    return "\n".join(lines)

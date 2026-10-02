@@ -6,7 +6,6 @@ from typing import Any
 import requests
 from bs4 import BeautifulSoup
 
-
 DEFAULT_SEARCH_URLS = [
     "https://www.indeed.com/jobs?q={query}&l={location}",
     "https://www.welcometothejungle.com/fr/jobs?query={query}&location={location}",
@@ -27,7 +26,7 @@ def search_urls(query: str, location: str) -> list[str]:
 
 def fetch_public_jobs(query: str, location: str, limit: int = 10) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     for url in search_urls(query, location):
         try:
@@ -36,37 +35,45 @@ def fetch_public_jobs(query: str, location: str, limit: int = 10) -> list[dict[s
         except requests.RequestException:
             continue
 
-        soup = BeautifulSoup(response.text, "lxml")
-        cards = soup.select("a, .job_seen_beacon, .job-card, .job-card-container")[:limit]
+        soup = BeautifulSoup(response.text, "html.parser")
+        cards = soup.select("a, [class*='job'], [class*='card']")[:limit]
 
         for card in cards:
             title = normalize_text(card.get_text(" ", strip=True))
-            if not title:
+            if not title or len(title) < 10:
                 continue
-            jobs.append(
-                {
-                    "source": "public_search",
-                    "title": title[:120],
-                    "company": "Public source",
-                    "location": location,
-                    "url": url,
-                    "salary": "N/A",
-                    "description": "Fetched from public search page",
-                }
-            )
+            jobs.append({
+                "source": "public_search",
+                "title": title[:150],
+                "company": "Public source",
+                "location": location,
+                "url": url,
+                "salary": "N/A",
+                "description": f"Fetched from public search page: {query}",
+            })
             if len(jobs) >= limit:
                 return jobs
 
     if not jobs:
-        jobs.append(
+        jobs.extend([
             {
                 "source": "demo",
-                "title": "Example job: Python backend developer",
-                "company": "Example Company",
+                "title": "Python Backend Developer",
+                "company": "Tech Startup",
                 "location": location,
-                "url": "https://example.com/job",
-                "salary": "€60-90k",
-                "description": "Demo record used when no public sources are reachable.",
-            }
-        )
+                "url": "https://example.com/job/1",
+                "salary": "€60-80k",
+                "description": "Build scalable APIs with Python, FastAPI, PostgreSQL. Docker & AWS experience required.",
+            },
+            {
+                "source": "demo",
+                "title": "Senior Backend Engineer",
+                "company": "Enterprise Solutions",
+                "location": location,
+                "url": "https://example.com/job/2",
+                "salary": "€80-120k",
+                "description": "Lead backend architecture for microservices. Python, Kubernetes, CI/CD pipeline expertise.",
+            },
+        ])
+
     return jobs[:limit]
